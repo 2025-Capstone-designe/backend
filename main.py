@@ -195,3 +195,5 @@ def get_recent_movements():
     result = [{"time": row[0], "x": row[1], "y": row[2]} for row in recent_movements]
     
     return {"recent_movements": result}
+
+print("hell0")
