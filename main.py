@@ -10,6 +10,9 @@ import pytz
 import logging
 from math import sqrt
 
+# 🔼 .env 파일 불러오기
+load_dotenv()
+
 # ✅ 로그 설정
 logging.basicConfig(level=logging.INFO)
 
