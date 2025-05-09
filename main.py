@@ -1,197 +1,198 @@
 from fastapi import *
-from fastapi.responses import StreamingResponse, HTMLResponse
+from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from datetime import datetime, date
 import mysql.connector
-from math import sqrt
-from datetime import datetime
 import os
-import cv2
-import numpy as np
-import threading
 from dotenv import load_dotenv
-import time
-from datetime import datetime, timezone
 import pytz
+import logging
+from math import sqrt
 
-# 대한민국 표준시 구하기
+# ✅ 로그 설정
+logging.basicConfig(level=logging.INFO)
+
+# ✅ 시간 변환
 def convert_utc_to_kst():
-    # UTC 시간 구하기
     utc_time = datetime.now(pytz.utc)
-    
-    # 대한민국 표준시로 변환
-    kst_timezone = pytz.timezone('Asia/Seoul')
-    kst_time = utc_time.astimezone(kst_timezone)
-    
-    # 문자열로 포맷팅하여 반환
-    return kst_time.strftime("%Y-%m-%d %H:%M:%S")
+    kst = pytz.timezone("Asia/Seoul")
+    return utc_time.astimezone(kst).strftime("%Y-%m-%d %H:%M:%S")
 
-# 함수 호출 예시
-time = convert_utc_to_kst()
-#uvicorn main:app --reload
-
+# ✅ FastAPI 및 환경변수 로드
 app = FastAPI()
 load_dotenv()
 
-origins = [
-	"*"
-]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-
 @app.get("/", response_class=HTMLResponse)
 def read_root():
-    html_content = '''<!DOCTYPE html>
+    return HTMLResponse(content="""
+        <!DOCTYPE html>
         <html lang="ko">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>카메라 미리보기</title>
-            <style>
-                body {
-                    display: flex;
-                    justify-content: center;
-                    align-items: center;
-                    height: 100vh;
-                    background-color: #f4f4f4;
-                }
-                video {
-                    border: 2px solid black;
-                    border-radius: 10px;
-                }
-            </style>
-        </head>
-        <body>
-            <video id="camera" autoplay playsinline></video>
-            <script>
-                async function startCamera() {
-                    try {
-                        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+        <head><meta charset="UTF-8"><title>카메라 미리보기</title></head>
+        <body><video id="camera" autoplay playsinline></video>
+        <script>
+            navigator.mediaDevices.getUserMedia({ video: true })
+                .then(stream => document.getElementById('camera').srcObject = stream)
+                .catch(error => console.error("카메라 접근 실패:", error));
+        </script></body></html>
+    """, status_code=200)
 
-                        // 스트림을 복제하여 사용
-                        const clonedStream = stream.clone();
-            
-                        document.getElementById('camera').srcObject = clonedStream;
-                    } catch (error) {
-                        console.error("카메라 접근 실패:", error);
-                    }
-                }
-                startCamera();
-            </script>
-        </body>
-        </html>
-        '''
-    return HTMLResponse(content=html_content, status_code=200)
-    # return {"Service Availalble!"}
-
-# 데이터베이스 연결
-# database 정보
+# ✅ DB 연결 설정
 db_config = {
-    "host": os.getenv("DB_HOST", "34.64.109.121"),
+    "host": os.getenv("DB_HOST"),
     "user": os.getenv("DB_USER"),
     "password": os.getenv("DB_PASSWORD"),
     "database": os.getenv("DB_NAME"),
     "port": int(os.getenv("DB_PORT", 3306)),
 }
 
-# 데이터베이스에 query문 보내는 알고리즘
+# ✅ 거리 계산 함수
+def calculate_distance(x1, y1, x2, y2):
+    if None in (x1, y1, x2, y2):
+        return 0.0
+    return round(sqrt((x2 - x1)**2 + (y2 - y1)**2), 4)
+
+# ✅ SELECT 전용 유틸
 def fetch_data(query, params=None):
     try:
         conn = mysql.connector.connect(**db_config)
-        cursor = conn.cursor()
+        cursor = conn.cursor(dictionary=True)
         cursor.execute(query, params or ())
         result = cursor.fetchall()
         cursor.close()
         conn.close()
         return result
     except mysql.connector.Error as err:
-        raise HTTPException(status_code=500, detail=f"Database error: {err}")
-    # finally:
-        # cursor.close()
-        # conn.close()
+        raise HTTPException(status_code=500, detail=f"DB 오류: {err}")
 
+# ✅ 마지막 좌표 조회
+def get_previous_coordinates(tracking_date):
+    query = "SELECT x, y FROM behavior_log WHERE detected = 1 AND DATE(timestamp) = %s ORDER BY timestamp DESC LIMIT 1"
+    result = fetch_data(query, (tracking_date,))
+    return (result[0]['x'], result[0]['y']) if result else (None, None)
+
+# ✅ 데이터 모델
 class TrackingData(BaseModel):
+    timestamp: datetime
     x: float
     y: float
+    detected: int
+    prox: int
+    prox_type: str
 
-# 거리 계산 알고리즘
-def calculate_distance(x1, y1, x2, y2):
-    if x1 is None or y1 is None:
-        return 0  # 첫 번째 데이터는 이동 거리 없음
-    return ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
-
-def get_previous_coordinates(tracking_date):
-    query = """
-        SELECT x, y FROM tracking_data 
-        WHERE DATE(time) = %s 
-        ORDER BY time DESC 
-        LIMIT 1
-    """
-    result = fetch_data(query, (tracking_date,))
-    return result[0] if result else (None, None)
-
-# 위치, 거리, 시간 데이터베이스에 저장 알고리즘
-@app.post("/tracking_data")
-def save_tracking_data(tracking: TrackingData):
+# ✅ 테이블 생성
+@app.on_event("startup")
+def create_behavior_log_table():
     try:
-        # 시간 구하기
-        time = convert_utc_to_kst()
-
-        # 이전 좌표 가져오기
-        today_date = time.split(" ")[0]
-        previous_x, previous_y = get_previous_coordinates(today_date)
-
-        # 거리 계산
-        distance = calculate_distance(previous_x, previous_y, tracking.x, tracking.y)
-        
-        # MySQL에 데이터 저장
         conn = mysql.connector.connect(**db_config)
         cursor = conn.cursor()
-        query = "INSERT INTO tracking_data (x, y, time, distance) VALUES (%s, %s, %s, %s)"
-        cursor.execute(query, (tracking.x, tracking.y, time, distance))
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS behavior_log (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            timestamp DATETIME NOT NULL,
+            x FLOAT,
+            y FLOAT,
+            distance FLOAT,
+            detected TINYINT(1),
+            prox TINYINT(1),
+            prox_type VARCHAR(20)
+        )
+        """)
         conn.commit()
+        logging.info("✅ behavior_log 테이블 생성 완료")
+    except Exception as e:
+        logging.error(f"❌ 테이블 생성 실패: {e}")
+    finally:
         cursor.close()
         conn.close()
 
+# ✅ 데이터 저장 API
+@app.post("/tracking_data")
+def save_tracking_data(data: TrackingData):
+    try:
+        conn = mysql.connector.connect(**db_config)
+        cursor = conn.cursor()
+
+        # 이전 좌표로부터 거리 계산
+        x1, y1 = get_previous_coordinates(data.timestamp.date())
+        dist = calculate_distance(x1, y1, data.x, data.y)
+
+        # 저장
+        cursor.execute("""
+            INSERT INTO behavior_log (timestamp, x, y, distance, detected, prox, prox_type)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """, (data.timestamp, data.x, data.y, dist, data.detected, data.prox, data.prox_type))
+        conn.commit()
         return {
             "message": "Tracking data saved",
-            "x": tracking.x,
-            "y": tracking.y,
-            "time": time,
-            "calculated_distance": distance,
+            "x": data.x,
+            "y": data.y,
+            "time": data.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+            "calculated_distance": dist,
+            "detected": data.detected
         }
     except Exception as e:
-        return {"error": str(e)}
+        raise HTTPException(status_code=500, detail=f"DB 저장 오류: {e}")
+    finally:
+        cursor.close()
+        conn.close()
 
-# 총 이동 거리 반환 알고리즘    
+# ✅ 하루 총 이동 거리
 @app.get("/daily_movement")
-def get_total_movement():
-    today_date = datetime.now().strftime('%Y-%m-%d')
-    query = """
-        SELECT COALESCE(SUM(distance), 0) FROM tracking_data 
-            WHERE DATE(time) = %s
-    """
-    result = fetch_data(query, (today_date,))
-    total_distance = result[0][0] if result and result[0][0] else 0  # None 방지
-    
-    return {"date": today_date, "total_movement": total_distance}
+def get_daily_movement(query_date: date):
+    result = fetch_data(
+        "SELECT SUM(distance) AS total FROM behavior_log WHERE DATE(timestamp) = %s AND detected = 1",
+        (query_date,)
+    )
+    return {
+        "date": str(query_date),
+        "total_movement": round(result[0]['total'] or 0.0, 4)
+    }
 
-# 최근 10개 데이터 반환 알고리즘
+# ✅ 최근 좌표 10개
 @app.get("/recent_movements")
 def get_recent_movements():
-    query = """
-        SELECT time, x, y 
-        FROM tracking_data 
-        ORDER BY time DESC 
-        LIMIT 10
-    """
-    recent_movements = fetch_data(query)
-    result = [{"time": row[0], "x": row[1], "y": row[2]} for row in recent_movements]
-    
+    result = fetch_data(
+        "SELECT timestamp AS time, x, y FROM behavior_log WHERE detected = 1 ORDER BY timestamp DESC LIMIT 10"
+    )
     return {"recent_movements": result}
+
+# ✅ 식사 시간 조회
+@app.get("/get_diet_info")
+def get_diet_time(query_date: date):
+    result = fetch_data(
+        "SELECT COUNT(*) AS total FROM behavior_log WHERE prox = 1 AND prox_type = 'eating' AND DATE(timestamp) = %s",
+        (query_date,)
+    )
+    return {"date": str(query_date), "total_diet": float(result[0]['total'])}
+
+# ✅ 수분 시간 조회
+@app.get("/get_water_info")
+def get_water_time(query_date: date):
+    result = fetch_data(
+        "SELECT COUNT(*) AS total FROM behavior_log WHERE prox = 1 AND prox_type = 'drinking' AND DATE(timestamp) = %s",
+        (query_date,)
+    )
+    return {"date": str(query_date), "total_water": float(result[0]['total'])}
+
+# ✅ 휴식 시간 계산
+@app.get("/get_sleep_info")
+def get_sleep_time(query_date: date):
+    result = fetch_data(
+        "SELECT " +
+        "(SELECT COUNT(*) FROM behavior_log WHERE detected = 1 AND DATE(timestamp) = %s) AS move, " +
+        "(SELECT COUNT(*) FROM behavior_log WHERE prox = 1 AND prox_type = 'eating' AND DATE(timestamp) = %s) AS eat, " +
+        "(SELECT COUNT(*) FROM behavior_log WHERE prox = 1 AND prox_type = 'drinking' AND DATE(timestamp) = %s) AS drink",
+        (query_date, query_date, query_date)
+    )
+    move, eat, drink = result[0]['move'], result[0]['eat'], result[0]['drink']
+    relaxing = max(86400 - move - eat - drink, 0)
+    return {"date": str(query_date), "total_sleep": float(relaxing)}
