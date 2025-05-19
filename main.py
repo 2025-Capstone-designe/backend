@@ -3,6 +3,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from datetime import datetime, date
+from datetime import timedelta
 import mysql.connector
 import os
 from dotenv import load_dotenv
@@ -16,12 +17,6 @@ load_dotenv()
 # ✅ 로그 설정
 logging.basicConfig(level=logging.INFO)
 
-# ✅ 시간 변환
-def convert_utc_to_kst():
-    utc_time = datetime.now(pytz.utc)
-    kst = pytz.timezone("Asia/Seoul")
-    return utc_time.astimezone(kst).strftime("%Y-%m-%d %H:%M:%S")
-
 # ✅ FastAPI 및 환경변수 로드
 app = FastAPI()
 load_dotenv()
@@ -34,19 +29,33 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ✅ 시간 변환
+def convert_utc_to_kst():
+    utc_time = datetime.now(pytz.utc)
+    kst = pytz.timezone("Asia/Seoul")
+    return utc_time.astimezone(kst).strftime("%Y-%m-%d %H:%M:%S")
+
 @app.get("/", response_class=HTMLResponse)
 def read_root():
-    return HTMLResponse(content="""
-        <!DOCTYPE html>
-        <html lang="ko">
-        <head><meta charset="UTF-8"><title>카메라 미리보기</title></head>
-        <body><video id="camera" autoplay playsinline></video>
-        <script>
-            navigator.mediaDevices.getUserMedia({ video: true })
-                .then(stream => document.getElementById('camera').srcObject = stream)
-                .catch(error => console.error("카메라 접근 실패:", error));
-        </script></body></html>
-    """, status_code=200)
+    try:
+        conn = mysql.connector.connect(**db_config)
+        conn.close()
+        status_msg = "✅ 데이터베이스 연결 성공"
+    except Exception as e:
+        status_msg = f"❌ 데이터베이스 연결 실패: {e}"
+
+    html_content = f"""
+    <!DOCTYPE html>
+    <html lang="ko">
+    <head><meta charset="UTF-8"><title>서버 상태</title></head>
+    <body>
+        <h1>서버 상태 확인</h1>
+        <p>{status_msg}</p>
+        <p>서버가 정상적으로 작동 중입니다.</p>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content, status_code=200)
 
 # ✅ DB 연결 설정
 db_config = {
@@ -78,7 +87,7 @@ def fetch_data(query, params=None):
 
 # ✅ 마지막 좌표 조회
 def get_previous_coordinates(tracking_date):
-    query = "SELECT x, y FROM behavior_log WHERE detected = 1 AND DATE(timestamp) = %s ORDER BY timestamp DESC LIMIT 1"
+    query = "SELECT x, y FROM behavior_log WHERE DATE(timestamp) = %s ORDER BY timestamp DESC LIMIT 1"
     result = fetch_data(query, (tracking_date,))
     return (result[0]['x'], result[0]['y']) if result else (None, None)
 
@@ -87,11 +96,10 @@ class TrackingData(BaseModel):
     timestamp: datetime
     x: float
     y: float
-    detected: int
-    prox: int
-    prox_type: str
+    home_data: int
+    eating_data: int
+    drinking_data: int
 
-# ✅ 테이블 생성
 @app.on_event("startup")
 def create_behavior_log_table():
     try:
@@ -104,9 +112,9 @@ def create_behavior_log_table():
             x FLOAT,
             y FLOAT,
             distance FLOAT,
-            detected TINYINT(1),
-            prox TINYINT(1),
-            prox_type VARCHAR(20)
+            home_data TINYINT(1),
+            eating_data TINYINT(1),
+            drinking_data TINYINT(1)
         )
         """)
         conn.commit()
@@ -160,42 +168,89 @@ def get_daily_movement(query_date: date):
         "total_movement": round(result[0]['total'] or 0.0, 4)
     }
 
-# ✅ 최근 좌표 10개
+# ✅ 최근 좌표 10개 (timestamp, x, y)
 @app.get("/recent_movements")
 def get_recent_movements():
     result = fetch_data(
-        "SELECT timestamp AS time, x, y FROM behavior_log WHERE detected = 1 ORDER BY timestamp DESC LIMIT 10"
+        "SELECT timestamp, x, y FROM behavior_log WHERE x IS NOT NULL AND y IS NOT NULL ORDER BY timestamp DESC LIMIT 10"
     )
     return {"recent_movements": result}
 
-# ✅ 식사 시간 조회
+from datetime import timedelta
+
+# ✅ 식사 시간 조회 + 전날 평균 (뷰 eating_log 사용)
 @app.get("/get_diet_info")
 def get_diet_time(query_date: date):
-    result = fetch_data(
-        "SELECT COUNT(*) AS total FROM behavior_log WHERE prox = 1 AND prox_type = 'eating' AND DATE(timestamp) = %s",
-        (query_date,)
-    )
-    return {"date": str(query_date), "total_diet": float(result[0]['total'])}
+    current = fetch_data("""
+        SELECT COUNT(*) AS total 
+        FROM eating_log 
+        WHERE DATE(timestamp) = %s
+    """, (query_date,))
 
-# ✅ 수분 시간 조회
+    prev_date = query_date - timedelta(days=1)
+    previous = fetch_data("""
+        SELECT COUNT(*) AS total 
+        FROM eating_log 
+        WHERE DATE(timestamp) = %s
+    """, (prev_date,))
+
+    return {
+        "date": str(query_date),
+        "total_diet": int(current[0]['total']),
+        "prev_avg_diet": int(previous[0]['total']),
+        "prev_date": str(prev_date)
+    }
+
+# ✅ 수분 시간 조회 + 전날 평균 (뷰 drinking_log 사용)
 @app.get("/get_water_info")
 def get_water_time(query_date: date):
-    result = fetch_data(
-        "SELECT COUNT(*) AS total FROM behavior_log WHERE prox = 1 AND prox_type = 'drinking' AND DATE(timestamp) = %s",
-        (query_date,)
-    )
-    return {"date": str(query_date), "total_water": float(result[0]['total'])}
+    current = fetch_data("""
+        SELECT COUNT(*) AS total 
+        FROM drinking_log 
+        WHERE DATE(timestamp) = %s
+    """, (query_date,))
 
-# ✅ 휴식 시간 계산
+    prev_date = query_date - timedelta(days=1)
+    previous = fetch_data("""
+        SELECT COUNT(*) AS total 
+        FROM drinking_log 
+        WHERE DATE(timestamp) = %s
+    """, (prev_date,))
+
+    return {
+        "date": str(query_date),
+        "total_water": int(current[0]['total']),
+        "prev_avg_water": int(previous[0]['total']),
+        "prev_date": str(prev_date)
+    }
+
+# ✅ 휴식 시간 계산 + 전날 평균 (뷰 home_log 사용)
 @app.get("/get_sleep_info")
 def get_sleep_time(query_date: date):
-    result = fetch_data(
-        "SELECT " +
-        "(SELECT COUNT(*) FROM behavior_log WHERE detected = 1 AND DATE(timestamp) = %s) AS move, " +
-        "(SELECT COUNT(*) FROM behavior_log WHERE prox = 1 AND prox_type = 'eating' AND DATE(timestamp) = %s) AS eat, " +
-        "(SELECT COUNT(*) FROM behavior_log WHERE prox = 1 AND prox_type = 'drinking' AND DATE(timestamp) = %s) AS drink",
-        (query_date, query_date, query_date)
-    )
-    move, eat, drink = result[0]['move'], result[0]['eat'], result[0]['drink']
-    relaxing = max(86400 - move - eat - drink, 0)
-    return {"date": str(query_date), "total_sleep": float(relaxing)}
+    result_today = fetch_data("""
+        SELECT 
+            (SELECT COUNT(*) FROM home_log WHERE DATE(timestamp) = %s) AS total,
+            (SELECT COUNT(*) FROM eating_log WHERE DATE(timestamp) = %s) AS eat,
+            (SELECT COUNT(*) FROM drinking_log WHERE DATE(timestamp) = %s) AS drink
+    """, (query_date, query_date, query_date))
+
+    prev_date = query_date - timedelta(days=1)
+    result_prev = fetch_data("""
+        SELECT 
+            (SELECT COUNT(*) FROM home_log WHERE DATE(timestamp) = %s) AS total,
+            (SELECT COUNT(*) FROM eating_log WHERE DATE(timestamp) = %s) AS eat,
+            (SELECT COUNT(*) FROM drinking_log WHERE DATE(timestamp) = %s) AS drink
+    """, (prev_date, prev_date, prev_date))
+
+    total, eat, drink = result_today[0]['total'], result_today[0]['eat'], result_today[0]['drink']
+    prev_total, prev_eat, prev_drink = result_prev[0]['total'], result_prev[0]['eat'], result_prev[0]['drink']
+
+    relaxing = max(86400 - total - eat - drink, 0)
+    prev_relaxing = max(86400 - prev_total - prev_eat - prev_drink, 0)
+
+    return {
+        "date": str(query_date),
+        "total_sleep": float(relaxing),
+        "prev_avg_sleep": float(prev_relaxing),
+        "prev_date": str(prev_date)
+    }
