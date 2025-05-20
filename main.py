@@ -41,7 +41,10 @@ app.add_middleware(
 # ✅ 시간 변환
 def convert_utc_to_kst():
     utc_time = datetime.now(pytz.utc)
+    # print(f"UTC Time: {utc_time}")
     kst = pytz.timezone("Asia/Seoul")
+    # print(f"KST Timezone: {kst}")
+    # print(utc_time.astimezone(kst).strftime("%Y-%m-%d %H:%M:%S"))
     return utc_time.astimezone(kst).strftime("%Y-%m-%d %H:%M:%S")
 
 
@@ -289,10 +292,10 @@ def get_gpt_advice():
 @app.get("/daily_movement")
 def get_daily_movement():
     kst_now = convert_utc_to_kst()
-    query_date = kst_now.date()  # YYYY-MM-DD 형태 추출
+    query_date = kst_now.split(" ")[0]  # YYYY-MM-DD 형태 추출
 
     result = fetch_data(
-        "SELECT SUM(distance) AS total FROM behavior_log WHERE DATE(timestamp) = %s AND detected = 1",
+        "SELECT SUM(distance) AS total FROM behavior_log WHERE DATE(timestamp) = %s",
         (query_date,)
     )
     return {
@@ -322,19 +325,21 @@ def get_diet_time():
         WHERE DATE(timestamp) = %s
     """, (query_date,))
 
-    prev_date = query_date - timedelta(days=1)
-    previous = fetch_data("""
-        SELECT COUNT(*) AS total 
-        FROM eating_log 
-        WHERE DATE(timestamp) = %s
-    """, (prev_date,))
+    start_date = query_date - timedelta(days=7)
+    end_date = query_date - timedelta(days=1)
+    previous_avg = fetch_data("""
+        SELECT ROUND(COUNT(*) / 7.0, 2) AS avg_total
+        FROM eating_log
+        WHERE DATE(timestamp) BETWEEN %s AND %s
+    """, (start_date, end_date))
 
     return {
         "date": str(query_date),
         "total_diet": int(current[0]['total']),
-        "prev_avg_diet": int(previous[0]['total']),
-        "prev_date": str(prev_date)
+        "prev_avg_diet": float(previous_avg[0]['avg_total']),
+        "prev_date_range": f"{start_date} ~ {end_date}"
     }
+
 
 
 # ✅ 수분 시간 조회 + 전날 평균 (뷰 drinking_log 사용)
@@ -349,19 +354,21 @@ def get_water_time():
         WHERE DATE(timestamp) = %s
     """, (query_date,))
 
-    prev_date = query_date - timedelta(days=1)
-    previous = fetch_data("""
-        SELECT COUNT(*) AS total 
-        FROM drinking_log 
-        WHERE DATE(timestamp) = %s
-    """, (prev_date,))
+    start_date = query_date - timedelta(days=7)
+    end_date = query_date - timedelta(days=1)
+    previous_avg = fetch_data("""
+        SELECT ROUND(COUNT(*) / 7.0, 2) AS avg_total
+        FROM drinking_log
+        WHERE DATE(timestamp) BETWEEN %s AND %s
+    """, (start_date, end_date))
 
     return {
         "date": str(query_date),
         "total_water": int(current[0]['total']),
-        "prev_avg_water": int(previous[0]['total']),
-        "prev_date": str(prev_date)
+        "prev_avg_water": float(previous_avg[0]['avg_total']),
+        "prev_date_range": f"{start_date} ~ {end_date}"
     }
+
 
 
 # ✅ 휴식 시간 계산 + 전날 평균 (뷰 home_log 사용)
@@ -377,24 +384,29 @@ def get_sleep_time():
             (SELECT COUNT(*) FROM drinking_log WHERE DATE(timestamp) = %s) AS drink
     """, (query_date, query_date, query_date))
 
-    prev_date = query_date - timedelta(days=1)
-    result_prev = fetch_data("""
-        SELECT 
-            (SELECT COUNT(*) FROM home_log WHERE DATE(timestamp) = %s) AS total,
-            (SELECT COUNT(*) FROM eating_log WHERE DATE(timestamp) = %s) AS eat,
-            (SELECT COUNT(*) FROM drinking_log WHERE DATE(timestamp) = %s) AS drink
-    """, (prev_date, prev_date, prev_date))
-
     total, eat, drink = result_today[0]['total'], result_today[0]['eat'], result_today[0]['drink']
-    prev_total, prev_eat, prev_drink = result_prev[0]['total'], result_prev[0]['eat'], result_prev[0]['drink']
-
     relaxing = max(86400 - total - eat - drink, 0)
-    prev_relaxing = max(86400 - prev_total - prev_eat - prev_drink, 0)
+
+    # 최근 7일 평균
+    avg_relaxing_seconds = fetch_data("""
+        SELECT ROUND(AVG(relaxing), 2) AS avg_relaxing FROM (
+            SELECT 
+                GREATEST(86400 - (
+                    (SELECT COUNT(*) FROM home_log WHERE DATE(timestamp) = d) +
+                    (SELECT COUNT(*) FROM eating_log WHERE DATE(timestamp) = d) +
+                    (SELECT COUNT(*) FROM drinking_log WHERE DATE(timestamp) = d)
+                ), 0) AS relaxing
+            FROM (
+                SELECT DATE(%s) - INTERVAL seq DAY AS d
+                FROM seq_1_to_7
+            ) days
+        ) AS relaxation_data
+    """, (query_date,))
 
     return {
         "date": str(query_date),
         "total_sleep": float(relaxing),
-        "prev_avg_sleep": float(prev_relaxing),
-        "prev_date": str(prev_date)
+        "prev_avg_sleep": float(avg_relaxing_seconds[0]['avg_relaxing']),
+        "prev_date_range": f"{query_date - timedelta(days=7)} ~ {query_date - timedelta(days=1)}"
     }
 
