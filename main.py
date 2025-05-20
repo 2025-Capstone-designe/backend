@@ -309,7 +309,10 @@ from datetime import timedelta
 
 # ✅ 식사 시간 조회 + 전날 평균 (뷰 eating_log 사용)
 @app.get("/get_diet_info")
-def get_diet_time(query_date: date):
+def get_diet_time():
+    query_datetime = convert_utc_to_kst()
+    query_date = datetime.strptime(query_datetime, "%Y-%m-%d %H:%M:%S").date()
+
     current = fetch_data("""
         SELECT COUNT(*) AS total 
         FROM eating_log 
@@ -330,9 +333,13 @@ def get_diet_time(query_date: date):
         "prev_date": str(prev_date)
     }
 
+
 # ✅ 수분 시간 조회 + 전날 평균 (뷰 drinking_log 사용)
 @app.get("/get_water_info")
-def get_water_time(query_date: date):
+def get_water_time():
+    query_datetime = convert_utc_to_kst()
+    query_date = datetime.strptime(query_datetime, "%Y-%m-%d %H:%M:%S").date()
+
     current = fetch_data("""
         SELECT COUNT(*) AS total 
         FROM drinking_log 
@@ -353,9 +360,13 @@ def get_water_time(query_date: date):
         "prev_date": str(prev_date)
     }
 
+
 # ✅ 휴식 시간 계산 + 전날 평균 (뷰 home_log 사용)
 @app.get("/get_sleep_info")
-def get_sleep_time(query_date: date):
+def get_sleep_time():
+    query_datetime = convert_utc_to_kst()
+    query_date = datetime.strptime(query_datetime, "%Y-%m-%d %H:%M:%S").date()
+
     result_today = fetch_data("""
         SELECT 
             (SELECT COUNT(*) FROM home_log WHERE DATE(timestamp) = %s) AS total,
@@ -383,3 +394,4 @@ def get_sleep_time(query_date: date):
         "prev_avg_sleep": float(prev_relaxing),
         "prev_date": str(prev_date)
     }
+
