@@ -285,9 +285,12 @@ def get_gpt_advice():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"GPT 조언 생성 오류: {e}")
 
-# ✅ 하루 총 이동 거리
+# ✅ 하루 총 이동 거리 (KST 기준 오늘 날짜 사용)
 @app.get("/daily_movement")
-def get_daily_movement(query_date: date):
+def get_daily_movement():
+    kst_now = convert_utc_to_kst()
+    query_date = kst_now.date()  # YYYY-MM-DD 형태 추출
+
     result = fetch_data(
         "SELECT SUM(distance) AS total FROM behavior_log WHERE DATE(timestamp) = %s AND detected = 1",
         (query_date,)
