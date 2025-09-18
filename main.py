@@ -4,7 +4,6 @@ import pytz
 from openai import OpenAI
 import logging
 from fastapi import *
-from math import sqrt
 import mysql.connector
 from dotenv import load_dotenv
 from pydantic import BaseModel
@@ -29,7 +28,7 @@ db_config = {
     "port": int(os.getenv("DB_PORT", 3306)),
 }
 
-# openai API 키 연결
+# openai API 키
 openai_key = os.getenv("OPENAI_KEY")
 
 app.add_middleware(
@@ -40,7 +39,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 한국 표준시 설정
+# 시간 변환
 def convert_utc_to_kst():
     utc_time = datetime.now(pytz.utc)
     # print(f"UTC Time: {utc_time}")
@@ -49,7 +48,7 @@ def convert_utc_to_kst():
     # print(utc_time.astimezone(kst).strftime("%Y-%m-%d %H:%M:%S"))
     return utc_time.astimezone(kst).strftime("%Y-%m-%d %H:%M:%S")
 
-# GPT 리뷰 생성 함수
+
 def get_review(
     api_key: str,
     avg_meal: float, avg_water: float, avg_rest: float,
@@ -85,7 +84,6 @@ def get_review(
                 {"role": "user", "content": prompt}
             ],
             temperature=0.7,
-            # 최대 토큰 제한
             max_tokens=300,
         )
 
@@ -94,43 +92,15 @@ def get_review(
     except Exception as e:
         return f"에러 발생: {str(e)}"
 
-#  거리 계산 함수
-def calculate_distance(x1, y1, x2, y2):
-    if None in (x1, y1, x2, y2):
-        return 0.0
-    return round(sqrt((x2 - x1)**2 + (y2 - y1)**2), 4)
 
-#  SELECT 전용 유틸
-def fetch_data(query, params=None):
-    try:
-        conn = mysql.connector.connect(**db_config)
-        cursor = conn.cursor(dictionary=True)
-        cursor.execute(query, params or ())
-        result = cursor.fetchall()
-        cursor.close()
-        conn.close()
-        return result
-    except mysql.connector.Error as err:
-        raise HTTPException(status_code=500, detail=f"DB 오류: {err}")
-    
-#  데이터 모델
-class TrackingData(BaseModel):
-    timestamp: datetime
-    x: float
-    y: float
-    home_data: int
-    eating_data: int
-    drinking_data: int
-
-#  기본 루트 - 서버 상태 확인
 @app.get("/", response_class=HTMLResponse)
 def read_root():
     try:
         conn = mysql.connector.connect(**db_config)
         conn.close()
-        status_msg = " 데이터베이스 연결 성공"
+        status_msg = "데이터베이스 연결 성공"
     except Exception as e:
-        status_msg = f"❌ 데이터베이스 연결 실패: {e}"
+        status_msg = f"데이터베이스 연결 실패: {e}"
 
     html_content = f"""
     <!DOCTYPE html>
@@ -145,7 +115,28 @@ def read_root():
     """
     return HTMLResponse(content=html_content, status_code=200)
 
-# 데이터베이스 테이블 생성 - 처음 한번만 실행
+# SELECT 전용 유틸
+def fetch_data(query, params=None):
+    try:
+        conn = mysql.connector.connect(**db_config)
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(query, params or ())
+        result = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        return result
+    except mysql.connector.Error as err:
+        raise HTTPException(status_code=500, detail=f"DB 오류: {err}")
+
+# 데이터 모델
+class TrackingData(BaseModel):
+    timestamp: datetime
+    x: float
+    y: float
+    home_data: int
+    eating_data: int
+    drinking_data: int
+
 @app.on_event("startup")
 def create_behavior_log_table():
     try:
@@ -158,83 +149,83 @@ def create_behavior_log_table():
             x FLOAT,
             y FLOAT,
             distance FLOAT,
-            home_data TINYINT(1),
-            eating_data TINYINT(1),
-            drinking_data TINYINT(1)
+            home_data FLOAT,
+            eating_data FLOAT,
+            drinking_data FLOAT
         )
         """)
         conn.commit()
-        logging.info(" behavior_log 테이블 생성 완료")
+        logging.info("behavior_log 테이블 생성 완료")
     except Exception as e:
-        logging.error(f"❌ 테이블 생성 실패: {e}")
+        logging.error(f"테이블 생성 실패: {e}")
     finally:
         cursor.close()
         conn.close()
 
-#  gpt조언 반환
+# gpt조언 받아오기
 @app.get("/get_gpt_advice")
 def get_gpt_advice():
     try:
-        #  평균 식사량 (최근 7일간 하루 평균)
+        # 평균 식사량 (최근 7일간 하루 평균)
         avg_eat = fetch_data("""
-            SELECT AVG(cnt) as avg_meal FROM (
-                SELECT COUNT(*) as cnt
-                FROM eating_log
+            SELECT AVG(daily_total) as avg_meal FROM (
+                SELECT SUM(eating_data) as daily_total
+                FROM behavior_log
                 WHERE timestamp >= CURDATE() - INTERVAL 7 DAY
+                AND eating_data IS NOT NULL AND eating_data > 0
                 GROUP BY DATE(timestamp)
-            ) AS daily_counts
+            ) AS daily_totals
         """)[0]['avg_meal'] or 0
 
-        #  평균 수분 섭취량
+        # 평균 수분 섭취량 (ml로 변환)
         avg_water = fetch_data("""
-            SELECT AVG(cnt) as avg_water FROM (
-                SELECT COUNT(*) as cnt
-                FROM drinking_log
+            SELECT AVG(daily_total * 3.6) as avg_water FROM (
+                SELECT SUM(drinking_data) as daily_total
+                FROM behavior_log
                 WHERE timestamp >= CURDATE() - INTERVAL 7 DAY
+                AND drinking_data IS NOT NULL AND drinking_data > 0
                 GROUP BY DATE(timestamp)
-            ) AS daily_counts
+            ) AS daily_totals
         """)[0]['avg_water'] or 0
 
-        #  평균 휴식량 (총 시간 - 활동 시간)
+        # 평균 휴식시간 (시간으로 변환)
         avg_rest = fetch_data("""
-            SELECT AVG(rest_time) AS avg_rest FROM (
-                SELECT 
-                    GREATEST(86400 - 
-                        (SELECT COUNT(*) FROM home_log WHERE DATE(timestamp) = d.dt) -
-                        (SELECT COUNT(*) FROM eating_log WHERE DATE(timestamp) = d.dt) -
-                        (SELECT COUNT(*) FROM drinking_log WHERE DATE(timestamp) = d.dt), 0) AS rest_time
-                FROM (
-                    SELECT DISTINCT DATE(timestamp) AS dt
-                    FROM home_log
-                    WHERE timestamp >= CURDATE() - INTERVAL 7 DAY
-                ) AS d
-            ) AS rest_table
+            SELECT AVG(daily_total / 3600) as avg_rest FROM (
+                SELECT SUM(home_data) as daily_total
+                FROM behavior_log
+                WHERE timestamp >= CURDATE() - INTERVAL 7 DAY
+                AND home_data IS NOT NULL AND home_data > 0
+                GROUP BY DATE(timestamp)
+            ) AS daily_totals
         """)[0]['avg_rest'] or 0
 
-        #  오늘 식사량
+        # 오늘 식사량
         cur_eat = fetch_data("""
-            SELECT COUNT(*) AS total FROM eating_log WHERE DATE(timestamp) = CURDATE()
+            SELECT COALESCE(SUM(eating_data), 0) AS total 
+            FROM behavior_log 
+            WHERE DATE(timestamp) = CURDATE() AND eating_data IS NOT NULL
         """)[0]['total'] or 0
 
-        #  오늘 수분 섭취량
-        cur_water = fetch_data("""
-            SELECT COUNT(*) AS total FROM drinking_log WHERE DATE(timestamp) = CURDATE()
+        # 오늘 수분 섭취량 (ml로 변환)
+        cur_water_percent = fetch_data("""
+            SELECT COALESCE(SUM(drinking_data), 0) AS total 
+            FROM behavior_log 
+            WHERE DATE(timestamp) = CURDATE() AND drinking_data IS NOT NULL
         """)[0]['total'] or 0
+        cur_water = cur_water_percent * 3.6  # ml로 변환
 
-        #  오늘 휴식량
-        rest_result = fetch_data("""
-            SELECT 
-                GREATEST(86400 - 
-                    (SELECT COUNT(*) FROM home_log WHERE DATE(timestamp) = CURDATE()) -
-                    (SELECT COUNT(*) FROM eating_log WHERE DATE(timestamp) = CURDATE()) -
-                    (SELECT COUNT(*) FROM drinking_log WHERE DATE(timestamp) = CURDATE()), 0
-                ) AS total_rest
-        """)[0]['total_rest'] or 0
+        # 오늘 휴식시간 (시간으로 변환)
+        cur_rest_seconds = fetch_data("""
+            SELECT COALESCE(SUM(home_data), 0) AS total 
+            FROM behavior_log 
+            WHERE DATE(timestamp) = CURDATE() AND home_data IS NOT NULL
+        """)[0]['total'] or 0
+        cur_rest = cur_rest_seconds / 3600  # 시간으로 변환
 
-        #  현재 시각 (KST)
+        # 현재 시각 (KST)
         now_kst = convert_utc_to_kst()
 
-        #  GPT 리뷰 생성
+        # GPT 리뷰 생성
         advice = get_review(
             api_key=openai_key,
             avg_meal=avg_eat,
@@ -242,7 +233,7 @@ def get_gpt_advice():
             avg_rest=avg_rest,
             cur_meal=cur_eat,
             cur_water=cur_water,
-            cur_rest=rest_result,
+            cur_rest=cur_rest,
             time=now_kst
         )
 
@@ -253,7 +244,7 @@ def get_gpt_advice():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"GPT 조언 생성 오류: {e}")
 
-#  하루 총 이동 거리 (한국 표준시 기준 오늘 날짜 사용)
+# 하루 총 이동 거리 (KST 기준 오늘 날짜 사용)
 @app.get("/daily_movement")
 def get_daily_movement():
     kst_now = convert_utc_to_kst()
@@ -268,7 +259,7 @@ def get_daily_movement():
         "total_movement": round(result[0]['total'] or 0.0, 4)
     }
 
-#  최근 좌표 10개 (timestamp, x, y)
+# 최근 좌표 10개 (timestamp, x, y) - 최신 10개를 제외한 그 다음 10개
 @app.get("/recent_movements")
 def get_recent_movements(isfirst: int = 0):
     if isfirst == 1:
@@ -281,20 +272,20 @@ def get_recent_movements(isfirst: int = 0):
         )
     return {"recent_movements": result}
 
-#  최근 7일간의 평균 이동 거리
+# 최근 7일간의 평균 이동 거리
 @app.get("/get_tracking_info")
 def get_tracking_info():
     query_datetime = convert_utc_to_kst()
     query_date = datetime.strptime(query_datetime, "%Y-%m-%d %H:%M:%S").date()
 
-    #  오늘 날짜의 총 이동 거리
+    # 오늘 날짜의 총 이동 거리
     today_total = fetch_data("""
         SELECT ROUND(SUM(distance), 2) AS total
         FROM behavior_log
         WHERE DATE(timestamp) = %s
     """, (query_date,))[0]['total'] or 0.0
 
-    #  지난 7일간의 하루 평균 이동 거리
+    # 지난 7일간의 하루 평균 이동 거리
     start_date = query_date - timedelta(days=7)
     end_date = query_date - timedelta(days=1)
     past_avg = fetch_data("""
@@ -311,94 +302,95 @@ def get_tracking_info():
         "avg_movement_past_7days": str(past_avg) + "m"
     }
 
-#  식사 시간 조회 + 전날 평균 (뷰 eating_log 사용)
+# 식사량 조회 + 전날 평균
 @app.get("/get_diet_info")
 def get_diet_time():
     query_datetime = convert_utc_to_kst()
     query_date = datetime.strptime(query_datetime, "%Y-%m-%d %H:%M:%S").date()
 
+    # 오늘 총 식사량
     current = fetch_data("""
-        SELECT COUNT(*) AS total 
-        FROM eating_log 
-        WHERE DATE(timestamp) = %s
+        SELECT COALESCE(SUM(eating_data), 0) AS total 
+        FROM behavior_log 
+        WHERE DATE(timestamp) = %s AND eating_data IS NOT NULL
     """, (query_date,))
 
+    # 지난 7일간 하루 평균 식사량
     start_date = query_date - timedelta(days=7)
     end_date = query_date - timedelta(days=1)
     previous_avg = fetch_data("""
-        SELECT ROUND(COUNT(*) / 7.0, 0) AS avg_total
-        FROM eating_log
-        WHERE DATE(timestamp) BETWEEN %s AND %s
+        SELECT ROUND(AVG(daily_total), 0) AS avg_total FROM (
+            SELECT SUM(eating_data) AS daily_total
+            FROM behavior_log
+            WHERE DATE(timestamp) BETWEEN %s AND %s
+            AND eating_data IS NOT NULL AND eating_data > 0
+            GROUP BY DATE(timestamp)
+        ) AS daily_totals
     """, (start_date, end_date))
 
     return {
         "total_diet": int(current[0]['total']),
-        "prev_avg_diet": previous_avg[0]['avg_total']
+        "prev_avg_diet": int(previous_avg[0]['avg_total'] or 0)
     }
 
-
-
-#  수분 시간 조회 + 전날 평균 (뷰 drinking_log 사용)
+# 음수량 조회 + 전날 평균 (ml로 변환)
 @app.get("/get_water_info")
 def get_water_time():
     query_datetime = convert_utc_to_kst()
     query_date = datetime.strptime(query_datetime, "%Y-%m-%d %H:%M:%S").date()
 
+    # 오늘 총 음수량 (퍼센트를 ml로 변환)
     current = fetch_data("""
-        SELECT COUNT(*) AS total 
-        FROM drinking_log 
-        WHERE DATE(timestamp) = %s
+        SELECT COALESCE(SUM(drinking_data), 0) * 3.6 AS total 
+        FROM behavior_log 
+        WHERE DATE(timestamp) = %s AND drinking_data IS NOT NULL
     """, (query_date,))
 
+    # 지난 7일간 하루 평균 음수량 (ml로 변환)
     start_date = query_date - timedelta(days=7)
     end_date = query_date - timedelta(days=1)
     previous_avg = fetch_data("""
-        SELECT ROUND(COUNT(*) / 7.0, 0) AS avg_total
-        FROM drinking_log
-        WHERE DATE(timestamp) BETWEEN %s AND %s
+        SELECT ROUND(AVG(daily_total * 3.6), 0) AS avg_total FROM (
+            SELECT SUM(drinking_data) AS daily_total
+            FROM behavior_log
+            WHERE DATE(timestamp) BETWEEN %s AND %s
+            AND drinking_data IS NOT NULL AND drinking_data > 0
+            GROUP BY DATE(timestamp)
+        ) AS daily_totals
     """, (start_date, end_date))
 
     return {
         "total_water": int(current[0]['total']),
-        "prev_avg_water": previous_avg[0]['avg_total']
+        "prev_avg_water": int(previous_avg[0]['avg_total'] or 0)
     }
 
-
-
-#  휴식 시간 계산 + 전날 평균 (뷰 home_log 사용)
+# 휴식 시간 계산 + 전날 평균 (초를 시간으로 변환)
 @app.get("/get_sleep_info")
 def get_sleep_time():
     query_datetime = convert_utc_to_kst()
     query_date = datetime.strptime(query_datetime, "%Y-%m-%d %H:%M:%S").date()
 
-    result_today = fetch_data("""
-        SELECT 
-            (SELECT COUNT(*) FROM home_log WHERE DATE(timestamp) = %s) AS total,
-            (SELECT COUNT(*) FROM eating_log WHERE DATE(timestamp) = %s) AS eat,
-            (SELECT COUNT(*) FROM drinking_log WHERE DATE(timestamp) = %s) AS drink
-    """, (query_date, query_date, query_date))
-
-    total, eat, drink = result_today[0]['total'], result_today[0]['eat'], result_today[0]['drink']
-    relaxing = max(86400 - total - eat - drink, 0)
-
-    # 최근 7일 평균
-    avg_relaxing_seconds = fetch_data("""
-        SELECT ROUND(AVG(relaxing), 2) AS avg_relaxing FROM (
-            SELECT 
-                GREATEST(86400 - (
-                    (SELECT COUNT(*) FROM home_log WHERE DATE(timestamp) = d) +
-                    (SELECT COUNT(*) FROM eating_log WHERE DATE(timestamp) = d) +
-                    (SELECT COUNT(*) FROM drinking_log WHERE DATE(timestamp) = d)
-                ), 0) AS relaxing
-            FROM (
-                SELECT DATE(%s) - INTERVAL seq DAY AS d
-                FROM seq_1_to_7
-            ) days
-        ) AS relaxation_data
+    # 오늘 총 휴식 시간 (초를 시간으로 변환)
+    current = fetch_data("""
+        SELECT COALESCE(SUM(home_data), 0) / 3600 AS total 
+        FROM behavior_log 
+        WHERE DATE(timestamp) = %s AND home_data IS NOT NULL
     """, (query_date,))
 
-    return {
-        "total_sleep": round(float(relaxing)/3600,1),
-        "prev_avg_sleep": round(float(avg_relaxing_seconds[0]['avg_relaxing'])/3600,1)
-    }
+    # 지난 7일간 하루 평균 휴식 시간 (초를 시간으로 변환)
+    start_date = query_date - timedelta(days=7)
+    end_date = query_date - timedelta(days=1)
+    previous_avg = fetch_data("""
+        SELECT ROUND(AVG(daily_total / 3600), 1) AS avg_total FROM (
+            SELECT SUM(home_data) AS daily_total
+            FROM behavior_log
+            WHERE DATE(timestamp) BETWEEN %s AND %s
+            AND home_data IS NOT NULL AND home_data > 0
+            GROUP BY DATE(timestamp)
+        ) AS daily_totals
+    """, (start_date, end_date))
 
+    return {
+        "total_sleep": round(float(current[0]['total']), 1),
+        "prev_avg_sleep": round(float(previous_avg[0]['avg_total'] or 0), 1)
+    }
