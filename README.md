@@ -1,7 +1,7 @@
 # Backend
 GCP클라우드에 올라가는 백엔드 코드 파일입니다
 
-![Image]([https://github.com/2025-Capstone-designe/backend/blob/main/assets/api%20%EB%AA%85%EC%84%B8.png](https://github.com/2025-Capstone-designe/backend/blob/main/assets/%EC%8B%9C%EC%8A%A4%ED%85%9C%20%EC%95%84%ED%82%A4%ED%85%8D%EC%B2%98.png))
+![Image](https://github.com/2025-Capstone-designe/backend/blob/main/assets/%EC%8B%9C%EC%8A%A4%ED%85%9C%20%EC%95%84%ED%82%A4%ED%85%8D%EC%B2%98.png)
 
 ## 기능
 1. 라즈베리파이로부터 받은 시간, 위치, 센서 데이터를 수신
