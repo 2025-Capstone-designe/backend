@@ -1,4 +1,5 @@
 import os
+from fastapi.encoders import jsonable_encoder
 import pytz
 from openai import OpenAI
 import logging
@@ -10,15 +11,16 @@ from pydantic import BaseModel
 from fastapi.responses import HTMLResponse
 from datetime import datetime, date, timedelta
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
-# ✅ 로그 설정
+# 로그 설정
 logging.basicConfig(level=logging.INFO)
 
-# ✅ FastAPI 및 환경변수 로드
+# FastAPI 및 환경변수 로드
 app = FastAPI()
 load_dotenv()
 
-# ✅ DB 연결 설정
+# DB 연결 설정
 db_config = {
     "host": os.getenv("DB_HOST"),
     "user": os.getenv("DB_USER"),
@@ -27,7 +29,7 @@ db_config = {
     "port": int(os.getenv("DB_PORT", 3306)),
 }
 
-# ✅ openai API 키
+# openai API 키 연결
 openai_key = os.getenv("OPENAI_KEY")
 
 app.add_middleware(
@@ -38,7 +40,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ✅ 시간 변환
+# 한국 표준시 설정
 def convert_utc_to_kst():
     utc_time = datetime.now(pytz.utc)
     # print(f"UTC Time: {utc_time}")
@@ -47,7 +49,7 @@ def convert_utc_to_kst():
     # print(utc_time.astimezone(kst).strftime("%Y-%m-%d %H:%M:%S"))
     return utc_time.astimezone(kst).strftime("%Y-%m-%d %H:%M:%S")
 
-
+# GPT 리뷰 생성 함수
 def get_review(
     api_key: str,
     avg_meal: float, avg_water: float, avg_rest: float,
@@ -59,14 +61,14 @@ def get_review(
     prompt = f"""
     다음은 어떤 개체의 활동 평균과 현재 상태 데이터입니다.
 
-    🕒 측정 시간: {time}
+    측정 시간: {time}
 
-    📊 평균 활동량:
+    평균 활동량:
     - 식사량: {avg_meal:.1f}g
     - 물 섭취량: {avg_water:.1f}ml
     - 휴식 시간: {avg_rest:.1f}시간
 
-    📈 현재 활동량:
+    현재 활동량:
     - 식사량: {cur_meal:.1f}g
     - 물 섭취량: {cur_water:.1f}ml
     - 휴식 시간: {cur_rest:.1f}시간
@@ -83,6 +85,7 @@ def get_review(
                 {"role": "user", "content": prompt}
             ],
             temperature=0.7,
+            # 최대 토큰 제한
             max_tokens=300,
         )
 
@@ -91,13 +94,41 @@ def get_review(
     except Exception as e:
         return f"에러 발생: {str(e)}"
 
+#  거리 계산 함수
+def calculate_distance(x1, y1, x2, y2):
+    if None in (x1, y1, x2, y2):
+        return 0.0
+    return round(sqrt((x2 - x1)**2 + (y2 - y1)**2), 4)
 
+#  SELECT 전용 유틸
+def fetch_data(query, params=None):
+    try:
+        conn = mysql.connector.connect(**db_config)
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(query, params or ())
+        result = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        return result
+    except mysql.connector.Error as err:
+        raise HTTPException(status_code=500, detail=f"DB 오류: {err}")
+    
+#  데이터 모델
+class TrackingData(BaseModel):
+    timestamp: datetime
+    x: float
+    y: float
+    home_data: int
+    eating_data: int
+    drinking_data: int
+
+#  기본 루트 - 서버 상태 확인
 @app.get("/", response_class=HTMLResponse)
 def read_root():
     try:
         conn = mysql.connector.connect(**db_config)
         conn.close()
-        status_msg = "✅ 데이터베이스 연결 성공"
+        status_msg = " 데이터베이스 연결 성공"
     except Exception as e:
         status_msg = f"❌ 데이터베이스 연결 실패: {e}"
 
@@ -114,42 +145,7 @@ def read_root():
     """
     return HTMLResponse(content=html_content, status_code=200)
 
-# ✅ 거리 계산 함수
-def calculate_distance(x1, y1, x2, y2):
-    if None in (x1, y1, x2, y2):
-        return 0.0
-    return round(sqrt((x2 - x1)**2 + (y2 - y1)**2), 4)
-
-# ✅ SELECT 전용 유틸
-def fetch_data(query, params=None):
-    try:
-        conn = mysql.connector.connect(**db_config)
-        cursor = conn.cursor(dictionary=True)
-        cursor.execute(query, params or ())
-        result = cursor.fetchall()
-        cursor.close()
-        conn.close()
-        return result
-    except mysql.connector.Error as err:
-        raise HTTPException(status_code=500, detail=f"DB 오류: {err}")
-
-# 라즈베리파이에서 좌표 보내는거로 처리됨
-
-# # ✅ 마지막 좌표 조회
-# def get_previous_coordinates(tracking_date):
-#     query = "SELECT x, y FROM behavior_log WHERE DATE(timestamp) = %s ORDER BY timestamp DESC LIMIT 1"
-#     result = fetch_data(query, (tracking_date,))
-#     return (result[0]['x'], result[0]['y']) if result else (None, None)
-
-# ✅ 데이터 모델
-class TrackingData(BaseModel):
-    timestamp: datetime
-    x: float
-    y: float
-    home_data: int
-    eating_data: int
-    drinking_data: int
-
+# 데이터베이스 테이블 생성 - 처음 한번만 실행
 @app.on_event("startup")
 def create_behavior_log_table():
     try:
@@ -168,49 +164,18 @@ def create_behavior_log_table():
         )
         """)
         conn.commit()
-        logging.info("✅ behavior_log 테이블 생성 완료")
+        logging.info(" behavior_log 테이블 생성 완료")
     except Exception as e:
         logging.error(f"❌ 테이블 생성 실패: {e}")
     finally:
         cursor.close()
         conn.close()
 
-# # ✅ 데이터 저장 API
-# @app.post("/tracking_data")
-# def save_tracking_data(data: TrackingData):
-#     try:
-#         conn = mysql.connector.connect(**db_config)
-#         cursor = conn.cursor()
-
-#         # 이전 좌표로부터 거리 계산
-#         x1, y1 = get_previous_coordinates(data.timestamp.date())
-#         dist = calculate_distance(x1, y1, data.x, data.y)
-
-#         # 저장
-#         cursor.execute("""
-#             INSERT INTO behavior_log (timestamp, x, y, distance, detected, prox, prox_type)
-#             VALUES (%s, %s, %s, %s, %s, %s, %s)
-#         """, (data.timestamp, data.x, data.y, dist, data.detected, data.prox, data.prox_type))
-#         conn.commit()
-#         return {
-#             "message": "Tracking data saved",
-#             "x": data.x,
-#             "y": data.y,
-#             "time": data.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
-#             "calculated_distance": dist,
-#             "detected": data.detected
-#         }
-#     except Exception as e:
-#         raise HTTPException(status_code=500, detail=f"DB 저장 오류: {e}")
-#     finally:
-#         cursor.close()
-#         conn.close()
-
-# ✅ gpt조언 받아오기
+#  gpt조언 반환
 @app.get("/get_gpt_advice")
 def get_gpt_advice():
     try:
-        # ✅ 평균 식사량 (최근 7일간 하루 평균)
+        #  평균 식사량 (최근 7일간 하루 평균)
         avg_eat = fetch_data("""
             SELECT AVG(cnt) as avg_meal FROM (
                 SELECT COUNT(*) as cnt
@@ -220,7 +185,7 @@ def get_gpt_advice():
             ) AS daily_counts
         """)[0]['avg_meal'] or 0
 
-        # ✅ 평균 수분 섭취량
+        #  평균 수분 섭취량
         avg_water = fetch_data("""
             SELECT AVG(cnt) as avg_water FROM (
                 SELECT COUNT(*) as cnt
@@ -230,7 +195,7 @@ def get_gpt_advice():
             ) AS daily_counts
         """)[0]['avg_water'] or 0
 
-        # ✅ 평균 휴식량 (총 시간 - 활동 시간)
+        #  평균 휴식량 (총 시간 - 활동 시간)
         avg_rest = fetch_data("""
             SELECT AVG(rest_time) AS avg_rest FROM (
                 SELECT 
@@ -246,17 +211,17 @@ def get_gpt_advice():
             ) AS rest_table
         """)[0]['avg_rest'] or 0
 
-        # ✅ 오늘 식사량
+        #  오늘 식사량
         cur_eat = fetch_data("""
             SELECT COUNT(*) AS total FROM eating_log WHERE DATE(timestamp) = CURDATE()
         """)[0]['total'] or 0
 
-        # ✅ 오늘 수분 섭취량
+        #  오늘 수분 섭취량
         cur_water = fetch_data("""
             SELECT COUNT(*) AS total FROM drinking_log WHERE DATE(timestamp) = CURDATE()
         """)[0]['total'] or 0
 
-        # ✅ 오늘 휴식량
+        #  오늘 휴식량
         rest_result = fetch_data("""
             SELECT 
                 GREATEST(86400 - 
@@ -266,10 +231,10 @@ def get_gpt_advice():
                 ) AS total_rest
         """)[0]['total_rest'] or 0
 
-        # ✅ 현재 시각 (KST)
+        #  현재 시각 (KST)
         now_kst = convert_utc_to_kst()
 
-        # ✅ GPT 리뷰 생성
+        #  GPT 리뷰 생성
         advice = get_review(
             api_key=openai_key,
             avg_meal=avg_eat,
@@ -288,7 +253,7 @@ def get_gpt_advice():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"GPT 조언 생성 오류: {e}")
 
-# ✅ 하루 총 이동 거리 (KST 기준 오늘 날짜 사용)
+#  하루 총 이동 거리 (한국 표준시 기준 오늘 날짜 사용)
 @app.get("/daily_movement")
 def get_daily_movement():
     kst_now = convert_utc_to_kst()
@@ -303,17 +268,50 @@ def get_daily_movement():
         "total_movement": round(result[0]['total'] or 0.0, 4)
     }
 
-# ✅ 최근 좌표 10개 (timestamp, x, y)
+#  최근 좌표 10개 (timestamp, x, y)
 @app.get("/recent_movements")
-def get_recent_movements():
-    result = fetch_data(
-        "SELECT timestamp, x, y FROM behavior_log WHERE x IS NOT NULL AND y IS NOT NULL ORDER BY timestamp DESC LIMIT 10"
-    )
+def get_recent_movements(isfirst: int = 0):
+    if isfirst == 1:
+        result = fetch_data(
+            "SELECT x, y FROM behavior_log WHERE x IS NOT NULL AND y IS NOT NULL ORDER BY timestamp DESC LIMIT 10 OFFSET 1"
+        )
+    else:
+        result = fetch_data(
+            "SELECT x, y FROM behavior_log WHERE x IS NOT NULL AND y IS NOT NULL ORDER BY timestamp DESC LIMIT 1 OFFSET 1"
+        )
     return {"recent_movements": result}
 
-from datetime import timedelta
+#  최근 7일간의 평균 이동 거리
+@app.get("/get_tracking_info")
+def get_tracking_info():
+    query_datetime = convert_utc_to_kst()
+    query_date = datetime.strptime(query_datetime, "%Y-%m-%d %H:%M:%S").date()
 
-# ✅ 식사 시간 조회 + 전날 평균 (뷰 eating_log 사용)
+    #  오늘 날짜의 총 이동 거리
+    today_total = fetch_data("""
+        SELECT ROUND(SUM(distance), 2) AS total
+        FROM behavior_log
+        WHERE DATE(timestamp) = %s
+    """, (query_date,))[0]['total'] or 0.0
+
+    #  지난 7일간의 하루 평균 이동 거리
+    start_date = query_date - timedelta(days=7)
+    end_date = query_date - timedelta(days=1)
+    past_avg = fetch_data("""
+        SELECT ROUND(AVG(daily_total), 2) AS avg_total FROM (
+            SELECT DATE(timestamp) AS dt, SUM(distance) AS daily_total
+            FROM behavior_log
+            WHERE DATE(timestamp) BETWEEN %s AND %s
+            GROUP BY DATE(timestamp)
+        ) AS daily_distances
+    """, (start_date, end_date))[0]['avg_total'] or 0.0
+
+    return {
+        "total_movement_today": str(today_total) + "m",
+        "avg_movement_past_7days": str(past_avg) + "m"
+    }
+
+#  식사 시간 조회 + 전날 평균 (뷰 eating_log 사용)
 @app.get("/get_diet_info")
 def get_diet_time():
     query_datetime = convert_utc_to_kst()
@@ -328,21 +326,19 @@ def get_diet_time():
     start_date = query_date - timedelta(days=7)
     end_date = query_date - timedelta(days=1)
     previous_avg = fetch_data("""
-        SELECT ROUND(COUNT(*) / 7.0, 2) AS avg_total
+        SELECT ROUND(COUNT(*) / 7.0, 0) AS avg_total
         FROM eating_log
         WHERE DATE(timestamp) BETWEEN %s AND %s
     """, (start_date, end_date))
 
     return {
-        "date": str(query_date),
         "total_diet": int(current[0]['total']),
-        "prev_avg_diet": float(previous_avg[0]['avg_total']),
-        "prev_date_range": f"{start_date} ~ {end_date}"
+        "prev_avg_diet": previous_avg[0]['avg_total']
     }
 
 
 
-# ✅ 수분 시간 조회 + 전날 평균 (뷰 drinking_log 사용)
+#  수분 시간 조회 + 전날 평균 (뷰 drinking_log 사용)
 @app.get("/get_water_info")
 def get_water_time():
     query_datetime = convert_utc_to_kst()
@@ -357,21 +353,19 @@ def get_water_time():
     start_date = query_date - timedelta(days=7)
     end_date = query_date - timedelta(days=1)
     previous_avg = fetch_data("""
-        SELECT ROUND(COUNT(*) / 7.0, 2) AS avg_total
+        SELECT ROUND(COUNT(*) / 7.0, 0) AS avg_total
         FROM drinking_log
         WHERE DATE(timestamp) BETWEEN %s AND %s
     """, (start_date, end_date))
 
     return {
-        "date": str(query_date),
         "total_water": int(current[0]['total']),
-        "prev_avg_water": float(previous_avg[0]['avg_total']),
-        "prev_date_range": f"{start_date} ~ {end_date}"
+        "prev_avg_water": previous_avg[0]['avg_total']
     }
 
 
 
-# ✅ 휴식 시간 계산 + 전날 평균 (뷰 home_log 사용)
+#  휴식 시간 계산 + 전날 평균 (뷰 home_log 사용)
 @app.get("/get_sleep_info")
 def get_sleep_time():
     query_datetime = convert_utc_to_kst()
@@ -404,9 +398,7 @@ def get_sleep_time():
     """, (query_date,))
 
     return {
-        "date": str(query_date),
-        "total_sleep": float(relaxing),
-        "prev_avg_sleep": float(avg_relaxing_seconds[0]['avg_relaxing']),
-        "prev_date_range": f"{query_date - timedelta(days=7)} ~ {query_date - timedelta(days=1)}"
+        "total_sleep": round(float(relaxing)/3600,1),
+        "prev_avg_sleep": round(float(avg_relaxing_seconds[0]['avg_relaxing'])/3600,1)
     }
 
